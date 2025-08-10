@@ -21,20 +21,11 @@ class ProxyListener(QObject):
         self.allowed_domains = []  # 新增：允许的域名列表
         
     def get_mitmdump_path(self):
-        """获取mitmdump可执行文件路径，优先系统安装的版本"""
+        """获取mitmdump可执行文件路径，优先本地版本"""
         import os
         import subprocess
         
-        # 首先尝试系统安装的mitmdump
-        try:
-            result = subprocess.run(['mitmdump', '--version'], 
-                                  capture_output=True, text=True, timeout=5)
-            if result.returncode == 0:
-                return 'mitmdump'
-        except:
-            pass
-        
-        # 然后尝试本地目录的mitmdump.exe
+        # 首先尝试本地目录的mitmdump.exe
         if getattr(sys, 'frozen', False):
             # 被PyInstaller打包
             base_path = sys._MEIPASS if hasattr(sys, '_MEIPASS') else os.path.dirname(sys.executable)
@@ -51,13 +42,26 @@ class ProxyListener(QObject):
             except:
                 pass
         
-        # 最后兜底
-        return 'mitmdump'
+        # 然后尝试系统安装的mitmdump
+        try:
+            result = subprocess.run(['mitmdump', '--version'], 
+                                  capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                return 'mitmdump'
+        except:
+            pass
+        
+        # 最后兜底，返回本地路径
+        return os.path.join(base_path, 'mitmdump.exe')
 
     def start_proxy(self):
         """启动mitmproxy代理服务器"""
         if self.is_running:
             return
+        
+        # 先停止可能存在的旧进程
+        self.stop_proxy()
+        
         try:
             self.is_running = True
             import subprocess, os
@@ -76,6 +80,14 @@ class ProxyListener(QObject):
             except FileNotFoundError:
                 raise Exception("未找到mitmdump程序，请先安装mitmproxy: pip install mitmproxy")
             
+            # 检查端口是否被占用
+            import socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            result = sock.connect_ex(('127.0.0.1', self.port))
+            sock.close()
+            if result == 0:
+                raise Exception(f"端口 {self.port} 已被占用，请选择其他端口或停止占用该端口的程序")
+            
             self.proxy_process = subprocess.Popen([
                 mitmdump_exe,
                 "--listen-port", str(self.port),
@@ -85,7 +97,7 @@ class ProxyListener(QObject):
             
             # 等待一小段时间检查进程是否正常启动
             import time
-            time.sleep(1)
+            time.sleep(2)
             if self.proxy_process.poll() is not None:
                 # 进程已经退出，获取错误信息
                 stdout, stderr = self.proxy_process.communicate()
@@ -129,10 +141,22 @@ class ProxyListener(QObject):
         try:
             if hasattr(self, 'proxy_process') and self.proxy_process:
                 self.proxy_process.terminate()
-                self.proxy_process.wait(timeout=5)
+                try:
+                    self.proxy_process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    self.proxy_process.kill()
+                    self.proxy_process.wait()
                 self.proxy_process = None
         except Exception as e:
             print(f"停止代理服务器失败: {e}")
+        
+        # 额外保险：杀死所有mitmdump进程
+        try:
+            import subprocess
+            subprocess.run(['taskkill', '/F', '/IM', 'mitmdump.exe'], 
+                         capture_output=True, check=False)
+        except Exception:
+            pass
     
     def get_captured_data(self):
         """获取所有捕获的数据"""
